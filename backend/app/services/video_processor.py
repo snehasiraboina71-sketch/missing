@@ -4,7 +4,7 @@ import json
 import time
 import math
 import numpy as np
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
 
 from app.config import settings

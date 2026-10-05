@@ -1,9 +1,18 @@
 import cv2
 import numpy as np
-import torch
-import torch.nn as nn
-import torchvision.transforms as T
-import torchvision.models as models
+try:
+    import torch
+    import torch.nn as nn
+    import torchvision.transforms as T
+    import torchvision.models as models
+    HAS_TORCH = True
+except ImportError:
+    torch = None
+    nn = None
+    T = None
+    models = None
+    HAS_TORCH = False
+
 from typing import List, Optional, Union
 from app.ai.base import BaseEmbeddingModel
 
@@ -16,39 +25,45 @@ class ReIDEmbeddingModel(BaseEmbeddingModel):
     3. Zero-mean centered and L2-normalized 512-D Re-ID feature embeddings.
     """
     def __init__(self, device: Optional[str] = None):
-        if device is None:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if HAS_TORCH:
+            if device is None:
+                self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            else:
+                self.device = torch.device(device)
+
+            try:
+                backbone = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.DEFAULT)
+            except Exception:
+                backbone = models.mobilenet_v3_small(weights=None)
+
+            self.features = backbone.features
+            self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+            
+            self.to(self.device)
+            self.eval()
+
+            # Standard Re-ID preprocessing
+            self.transform = T.Compose([
+                T.ToPILImage(),
+                T.Resize((256, 128), interpolation=T.InterpolationMode.BILINEAR),
+                T.ToTensor(),
+                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
         else:
-            self.device = torch.device(device)
-
-        try:
-            backbone = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.DEFAULT)
-        except Exception:
-            backbone = models.mobilenet_v3_small(weights=None)
-
-        self.features = backbone.features
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        
-        self.to(self.device)
-        self.eval()
-
-        # Standard Re-ID preprocessing
-        self.transform = T.Compose([
-            T.ToPILImage(),
-            T.Resize((256, 128), interpolation=T.InterpolationMode.BILINEAR),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
+            self.device = "cpu"
 
     def to(self, device):
         self.device = device
-        self.features.to(device)
-        self.avgpool.to(device)
+        if HAS_TORCH and hasattr(self, 'features'):
+            self.features.to(device)
+            self.avgpool.to(device)
         return self
 
     def eval(self):
-        self.features.eval()
+        if HAS_TORCH and hasattr(self, 'features'):
+            self.features.eval()
         return self
+
 
     def _extract_part_descriptors(self, crop_bgr: np.ndarray) -> np.ndarray:
         """Extracts vertical spatial part appearance histograms (Head, Torso, Legs)."""
@@ -93,32 +108,43 @@ class ReIDEmbeddingModel(BaseEmbeddingModel):
         if image_crop is None or image_crop.size == 0:
             return np.zeros(288, dtype=np.float32)
 
-        rgb_crop = cv2.cvtColor(image_crop, cv2.COLOR_BGR2RGB) if len(image_crop.shape) == 3 and image_crop.shape[2] == 3 else image_crop
-        tensor_img = self.transform(rgb_crop).unsqueeze(0).to(self.device)
-
-        with torch.no_grad():
-            f = self.features(tensor_img)
-            f_pool = self.avgpool(f)
-            cnn_feat = torch.flatten(f_pool, 1)
-            cnn_feat = cnn_feat - torch.mean(cnn_feat, dim=1, keepdim=True)
-            cnn_norm = torch.norm(cnn_feat, p=2, dim=1, keepdim=True).clamp(min=1e-12)
-            cnn_vec = (cnn_feat / cnn_norm).squeeze(0).cpu().numpy().astype(np.float32)
-            # Reduce dimension
-            cnn_vec_sampled = cnn_vec[:192]
-            n_cnn = np.linalg.norm(cnn_vec_sampled)
-            if n_cnn > 1e-12:
-                cnn_vec_sampled /= n_cnn
-
-        # Spatial part appearance features (96-D)
         part_vec = self._extract_part_descriptors(image_crop)
 
-        # Fuse: 40% deep CNN geometry + 60% spatial part distribution
-        fused = np.concatenate([cnn_vec_sampled * 0.40, part_vec * 0.60])
-        norm = np.linalg.norm(fused)
-        if norm > 1e-12:
-            fused = fused / norm
+        if HAS_TORCH and hasattr(self, 'features'):
+            try:
+                rgb_crop = cv2.cvtColor(image_crop, cv2.COLOR_BGR2RGB) if len(image_crop.shape) == 3 and image_crop.shape[2] == 3 else image_crop
+                tensor_img = self.transform(rgb_crop).unsqueeze(0).to(self.device)
 
-        return fused.astype(np.float32)
+                with torch.no_grad():
+                    f = self.features(tensor_img)
+                    f_pool = self.avgpool(f)
+                    cnn_feat = torch.flatten(f_pool, 1)
+                    cnn_feat = cnn_feat - torch.mean(cnn_feat, dim=1, keepdim=True)
+                    cnn_norm = torch.norm(cnn_feat, p=2, dim=1, keepdim=True).clamp(min=1e-12)
+                    cnn_vec = (cnn_feat / cnn_norm).squeeze(0).cpu().numpy().astype(np.float32)
+                    # Reduce dimension
+                    cnn_vec_sampled = cnn_vec[:192]
+                    n_cnn = np.linalg.norm(cnn_vec_sampled)
+                    if n_cnn > 1e-12:
+                        cnn_vec_sampled /= n_cnn
+
+                # Fuse: 40% deep CNN geometry + 60% spatial part distribution
+                fused = np.concatenate([cnn_vec_sampled * 0.40, part_vec * 0.60])
+                norm = np.linalg.norm(fused)
+                if norm > 1e-12:
+                    fused = fused / norm
+                return fused.astype(np.float32)
+            except Exception as e:
+                print(f"[ReIDEmbeddingModel] Torch inference fallback: {e}")
+
+        # Spatial part appearance features padded to 288-D
+        padded = np.zeros(288, dtype=np.float32)
+        padded[:len(part_vec)] = part_vec
+        norm = np.linalg.norm(padded)
+        if norm > 1e-12:
+            padded = padded / norm
+        return padded.astype(np.float32)
+
 
     def extract_batch_embeddings(self, crops: List[np.ndarray]) -> np.ndarray:
         """Extracts L2-normalized 2D embeddings array (N, D) for a batch of crops."""

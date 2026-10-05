@@ -1,7 +1,14 @@
 import cv2
 import numpy as np
-import torch
-import torchvision.transforms as T
+try:
+    import torch
+    import torchvision.transforms as T
+    HAS_TORCH = True
+except ImportError:
+    torch = None
+    T = None
+    HAS_TORCH = False
+
 from typing import List, Dict, Any, Optional
 from app.ai.base import BasePersonDetector
 
@@ -11,6 +18,9 @@ class TorchPersonDetector(BasePersonDetector):
     Specifically tuned for class 'person' (COCO class ID 1) with configurable detection threshold.
     """
     def __init__(self, device: Optional[str] = None):
+        if not HAS_TORCH:
+            raise ImportError("PyTorch/torchvision is not installed in the current environment")
+
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:

@@ -1,4 +1,10 @@
-import torch
+try:
+    import torch
+    HAS_TORCH = True
+except ImportError:
+    torch = None
+    HAS_TORCH = False
+
 from fastapi import APIRouter
 from app.config import settings
 from app.services.calibration_service import CalibrationService
@@ -9,9 +15,10 @@ router = APIRouter(prefix="/settings", tags=["Settings"])
 @router.get("")
 def get_system_settings():
     detector, embedding_model = get_ai_models()
-    device_name = "CUDA GPU" if torch.cuda.is_available() else "CPU"
+    device_name = "CUDA GPU" if (HAS_TORCH and torch.cuda.is_available()) else "CPU"
     detector_name = detector.__class__.__name__
     embedding_name = embedding_model.__class__.__name__
+
 
     return {
         "project_name": settings.PROJECT_NAME,
